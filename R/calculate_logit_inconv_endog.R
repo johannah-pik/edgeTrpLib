@@ -393,13 +393,13 @@ calculate_logit_inconv_endog = function(prices,
                 tmp1[, .(region, year, share, technology, vehicle_type, subsector_L1, subsector_L2, subsector_L3, sector, fuel_price_pkm, non_fuel_price, tot_price)])
 
     ## merge energy intensity
-    MJ_km <- merge(df, mj_km_data, by=intersect(names(df),names(mj_km_data)),all = FALSE)
+    MJ_km <- merge(df, mj_km_data, by = intersect(names(df),names(mj_km_data)), all = FALSE)
     MJ_km <- MJ_km[, .(MJ_km = sum(share * MJ_km)),
                    by = c("region", "year", "technology", group_value)]
 
     ## save complete dt at this level
     df_shares <- copy(df)
-    df_shares <- df_shares[,tot_VOT_price:=0]
+    df_shares <- df_shares[, tot_VOT_price := 0]
     ## get rid of the ( misleading afterwards) columns
     df_shares <- df_shares[
       , c("share", "region", "year",
