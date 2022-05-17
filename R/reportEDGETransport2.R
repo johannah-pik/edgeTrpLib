@@ -24,6 +24,8 @@
 #' @importFrom data.table fread fwrite rbindlist copy CJ
 #' @importFrom remind2 toolRegionSubsets
 #' @importFrom quitte as.quitte
+#' @importFrom magclass as.magpie getItems getNames mselect dimSums
+#' @importFrom dplyr %>%
 #' @export
 
 reportEDGETransport2 <- function(output_folder = ".", sub_folder = "EDGE-T/",
@@ -50,13 +52,109 @@ reportEDGETransport2 <- function(output_folder = ".", sub_folder = "EDGE-T/",
   datapath <- function(fname){
     file.path(output_folder, sub_folder, fname)}
 
-  reporting <- function(datatable, mode){
+  # splits  FE Liquids variables into Biomass, Fossil and Hydrogen according to FE demand shares
+  split_fe_liquids <- function(df) {
+    demFeSector <- readGDX(gdx, "vm_demFeSector", field = "l", restore_zeros = F)
+
+    # biomass share in biomass+hydrogen liquids in total transport sector
+    bioShareTrans <- dimSums(mselect(demFeSector, all_enty = "seliqbio", emi_sectors = "trans"), dim = 3, na.rm = T) /
+      dimSums(mselect(demFeSector, all_enty = c("seliqbio", "seliqsyn"), emi_sectors = "trans"), dim = 3, na.rm = T)
+
+    # hydrogen share in biomass+hydrogen liquids in total transport sector
+    synShareTrans <- dimSums(mselect(demFeSector, all_enty = "seliqsyn", emi_sectors = "trans"), dim = 3, na.rm = T) /
+      dimSums(mselect(demFeSector, all_enty = c("seliqbio", "seliqsyn"), emi_sectors = "trans"), dim = 3, na.rm = T)
+
+    # calculate LDV share ----
+
+    # liquids for LDVs
+    demFeSectorLdv <- mselect(demFeSector,
+      all_enty = c("seliqfos", "seliqbio", "seliqsyn"),
+      all_enty1 = "fepet", emi_sectors = "trans"
+    )
+
+    feShareLdvLiqFos <- dimSums(demFeSectorLdv[, , "seliqfos.fepet"], dim = 3, na.rm = T) / dimSums(demFeSectorLdv, dim = 3, na.rm = T)
+
+    # for non-fossil liquids we apply the share of the transport sector to the subsector
+    feShareLdvLiqBio <- dimSums(mselect(demFeSectorLdv, all_enty = c("seliqbio", "seliqsyn")), dim = 3, na.rm = T) * bioShareTrans / dimSums(demFeSectorLdv, dim = 3, na.rm = T)
+    feShareLdvLiqSyn <- dimSums(mselect(demFeSectorLdv, all_enty = c("seliqbio", "seliqsyn")), dim = 3, na.rm = T) * synShareTrans / dimSums(demFeSectorLdv, dim = 3, na.rm = T)
+
+    # calculate share for Non-LDV (Trucks, Domestic Aviation etc.) ----
+
+    # liquids for Non-LDVs
+    demFeSectorNonLdv <- mselect(demFeSector,
+      all_enty = c("seliqfos", "seliqbio", "seliqsyn"),
+      all_enty1 = "fedie", emi_sectors = "trans", all_emiMkt = "ES"
+    )
+
+    feShareNonLdvLiqFos <- demFeSectorNonLdv[, , "seliqfos.fedie"] / dimSums(demFeSectorNonLdv, dim = 3, na.rm = T)
+    feShareNonLdvLiqBio <- dimSums(mselect(demFeSectorNonLdv, all_enty = c("seliqbio", "seliqsyn")), dim = 3, na.rm = T) * bioShareTrans / dimSums(demFeSectorNonLdv, dim = 3, na.rm = T)
+    feShareNonLdvLiqSyn <- dimSums(mselect(demFeSectorNonLdv, all_enty = c("seliqbio", "seliqsyn")), dim = 3, na.rm = T) * synShareTrans / dimSums(demFeSectorNonLdv, dim = 3, na.rm = T)
+
+    # calculate share for Bunkers ----
+
+    # liquids for bunkers
+    demFeSectorBunkers <- mselect(demFeSector,
+      all_enty = c("seliqfos", "seliqbio", "seliqsyn"),
+      all_enty1 = "fedie", emi_sectors = "trans", all_emiMkt = "other"
+    )
+
+    feShareBunkersLiqFos <- demFeSectorBunkers[, , "seliqfos.fedie"] / dimSums(demFeSectorBunkers, dim = 3, na.rm = T)
+    feShareBunkersLiqBio <- dimSums(mselect(demFeSectorBunkers, all_enty = c("seliqbio", "seliqsyn")), dim = 3, na.rm = T) * bioShareTrans / dimSums(demFeSectorBunkers, dim = 3, na.rm = T)
+    feShareBunkersLiqSyn <- dimSums(mselect(demFeSectorBunkers, all_enty = c("seliqbio", "seliqsyn")), dim = 3, na.rm = T) * synShareTrans / dimSums(demFeSectorBunkers, dim = 3, na.rm = T)
+
+    # apply splits to data frame ----
+    m <- as.magpie(df[, c(4, 1, 5, 6, 2, 3, 7)])
+    y <- intersect(getItems(m, dim = 2), getItems(demFeSector, dim = 2))
+    prefix <- paste0(getNames(m, dim = 1), ".", getNames(m, dim = 2), ".")
+    suffix <- paste0(".", getNames(m, dim = 4))
+
+    tmp <- mbind(
+      setNames(m[, y, "FE|Transport|Pass|Road|LDV|Liquids"] * feShareLdvLiqFos[, y, ], paste0(prefix, "FE|Transport|Pass|Road|LDV|Liquids|Fossil", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Road|LDV|Liquids"] * feShareLdvLiqBio[, y, ], paste0(prefix, "FE|Transport|Pass|Road|LDV|Liquids|Biomass", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Road|LDV|Liquids"] * feShareLdvLiqSyn[, y, ], paste0(prefix, "FE|Transport|Pass|Road|LDV|Liquids|Hydrogen", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|Road|Liquids"] * feShareNonLdvLiqFos[, y, ], paste0(prefix, "FE|Transport|Freight|Road|Liquids|Fossil", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|Road|Liquids"] * feShareNonLdvLiqBio[, y, ], paste0(prefix, "FE|Transport|Freight|Road|Liquids|Biomass", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|Road|Liquids"] * feShareNonLdvLiqSyn[, y, ], paste0(prefix, "FE|Transport|Freight|Road|Liquids|Hydrogen", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Road|Bus|Liquids"] * feShareNonLdvLiqFos[, y, ], paste0(prefix, "FE|Transport|Pass|Road|Bus|Liquids|Fossil", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Road|Bus|Liquids"] * feShareNonLdvLiqBio[, y, ], paste0(prefix, "FE|Transport|Pass|Road|Bus|Liquids|Biomass", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Road|Bus|Liquids"] * feShareNonLdvLiqSyn[, y, ], paste0(prefix, "FE|Transport|Pass|Road|Bus|Liquids|Hydrogen", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|Rail|Liquids"] * feShareNonLdvLiqFos[, y, ], paste0(prefix, "FE|Transport|Freight|Rail|Liquids|Fossil", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|Rail|Liquids"] * feShareNonLdvLiqBio[, y, ], paste0(prefix, "FE|Transport|Freight|Rail|Liquids|Biomass", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|Rail|Liquids"] * feShareNonLdvLiqSyn[, y, ], paste0(prefix, "FE|Transport|Freight|Rail|Liquids|Hydrogen", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Rail|Liquids"] * feShareNonLdvLiqFos[, y, ], paste0(prefix, "FE|Transport|Pass|Rail|Liquids|Fossil", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Rail|Liquids"] * feShareNonLdvLiqBio[, y, ], paste0(prefix, "FE|Transport|Pass|Rail|Liquids|Biomass", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Rail|Liquids"] * feShareNonLdvLiqSyn[, y, ], paste0(prefix, "FE|Transport|Pass|Rail|Liquids|Hydrogen", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Aviation|Domestic|Liquids"] * feShareNonLdvLiqFos[, y, ], paste0(prefix, "FE|Transport|Pass|Aviation|Domestic|Liquids|Fossil", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Aviation|Domestic|Liquids"] * feShareNonLdvLiqBio[, y, ], paste0(prefix, "FE|Transport|Pass|Aviation|Domestic|Liquids|Biomass", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Aviation|Domestic|Liquids"] * feShareNonLdvLiqSyn[, y, ], paste0(prefix, "FE|Transport|Pass|Aviation|Domestic|Liquids|Hydrogen", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|Navigation|Liquids"] * feShareNonLdvLiqFos[, y, ], paste0(prefix, "FE|Transport|Freight|Navigation|Liquids|Fossil", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|Navigation|Liquids"] * feShareNonLdvLiqBio[, y, ], paste0(prefix, "FE|Transport|Freight|Navigation|Liquids|Biomass", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|Navigation|Liquids"] * feShareNonLdvLiqSyn[, y, ], paste0(prefix, "FE|Transport|Freight|Navigation|Liquids|Hydrogen", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Aviation|International|Liquids"] * feShareBunkersLiqFos[, y, ], paste0(prefix, "FE|Transport|Pass|Aviation|International|Liquids|Fossil", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Aviation|International|Liquids"] * feShareBunkersLiqBio[, y, ], paste0(prefix, "FE|Transport|Pass|Aviation|International|Liquids|Biomass", suffix)),
+      setNames(m[, y, "FE|Transport|Pass|Aviation|International|Liquids"] * feShareBunkersLiqSyn[, y, ], paste0(prefix, "FE|Transport|Pass|Aviation|International|Liquids|Hydrogen", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|International Shipping|Liquids"] * feShareBunkersLiqFos[, y, ], paste0(prefix, "FE|Transport|Freight|International Shipping|Liquids|Fossil", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|International Shipping|Liquids"] * feShareBunkersLiqBio[, y, ], paste0(prefix, "FE|Transport|Freight|International Shipping|Liquids|Biomass", suffix)),
+      setNames(m[, y, "FE|Transport|Freight|International Shipping|Liquids"] * feShareBunkersLiqSyn[, y, ], paste0(prefix, "FE|Transport|Freight|International Shipping|Liquids|Hydrogen", suffix))
+    )
+
+    as.data.frame(tmp, rev = 2) %>%
+      as.data.table() %>%
+      setnames(".value", "value") %>%
+      return()
+  }
+
+  reporting <- function(dt, mode){
+    datatable <- copy(dt)
     aggr_mode_tech <- aggr_LDV <- aggr_LDV_tech <- det_veh_tech <- aggr_bunkers <- aggr_bunkers_tech <- aggr_veh_tech <- capture.output <- NULL
     report <- list()
 
 
     datatable[, sector := ifelse(sector %in% c("trn_pass", "trn_aviation_intl"), "Pass", "Freight")]
     datatable <- merge(datatable,Aggrdata,by = c("sector", "subsector_L1", "subsector_L2", "subsector_L3", "vehicle_type", "technology"), all.x = TRUE, allow.cartesian = TRUE)
+
+    datatable[grepl("Passenger Rail|HSR", vehicle_type), aggr_veh := "Pass|Rail"]
+
 
     #How to account for Hybrid Electric in Final Energy?
     if (mode == "FE") {
@@ -104,7 +202,7 @@ reportEDGETransport2 <- function(output_folder = ".", sub_folder = "EDGE-T/",
         datatable0 <- datatable0[sector == var0, .(value = sum(value, na.rm = T)),
                                  by = c("region", "year", Aggr0)]
 
-        if(nrow(datatable0) > 0) {
+        if (nrow(datatable0) > 0) {
 
           setnames(datatable0, "year", "period")
 
@@ -117,6 +215,11 @@ reportEDGETransport2 <- function(output_folder = ".", sub_folder = "EDGE-T/",
           report <- rbind(report, datatable0)}
 
       }
+    }
+
+
+    if (mode == "FE") {
+       report <- rbind(report, split_fe_liquids(report))
     }
 
     return(report)
@@ -314,37 +417,44 @@ reportEDGETransport2 <- function(output_folder = ".", sub_folder = "EDGE-T/",
   load_factor <- readRDS(datapath(fname = "loadFactor.RDS"))
   annual_mileage <- readRDS(datapath(fname = "annual_mileage.RDS"))
 
-  if (length(annual_mileage)> 4){
-    #Same is done in lvl2_createoutput
+  if (length(annual_mileage) > 4) {
+    # Same is done in lvl2_createoutput
     annual_mileage <- unique(annual_mileage[, c("region", "year", "vkm.veh", "vehicle_type")])
     setnames(annual_mileage, old = "vkm.veh", new = "annual_mileage")
   }
-  if (length(load_factor)> 4){
-   load_factor <- load_factor[, c("year","region","vehicle_type","loadFactor","technology")]
-  demand_vkm <- merge(demand_km, load_factor, by = c("year", "region", "vehicle_type","technology"))
-  demand_vkm[, value := value/loadFactor] ## billion vkm
+  if (length(load_factor) > 4) {
+    load_factor <- load_factor[, c("year", "region", "vehicle_type", "loadFactor", "technology")]
+    demand_vkm <- merge(demand_km, load_factor, by = c("year", "region", "vehicle_type", "technology"))
+    demand_vkm[, value := value / loadFactor] ## billion vkm
   } else {
-  demand_vkm <- merge(demand_km, load_factor, by = c("year", "region", "vehicle_type"))
-  demand_vkm[, value := value/loadFactor]} ## billion vkm
-
+    demand_vkm <- merge(demand_km, load_factor, by = c("year", "region", "vehicle_type"))
+    demand_vkm[, value := value / loadFactor] ## billion vkm
+  }
 
   repFE <- reporting(
-    demand_ej,
-    mode = "FE")
+    dt = demand_ej,
+    mode = "FE"
+  )
   repVKM <- reporting(
-    datatable = demand_vkm,
-    mode = "VKM")
+    dt = demand_vkm,
+    mode = "VKM"
+  )
   repES <- reporting(
-    datatable = demand_km,
-    mode = "ES")
+    dt = demand_km,
+    mode = "ES"
+  )
   toMIF <- rbind(
     repFE,
     repVKM,
     repES,
-    reportingVehNum(repVKM,
-                    annual_mileage),
-    reportingEmi(repFE = repFE,
-                 gdx = gdx)
+    reportingVehNum(
+      repVKM,
+      annual_mileage
+    ),
+    reportingEmi(
+      repFE = repFE,
+      gdx = gdx
+    )
   )
 
   varsl <- list(
